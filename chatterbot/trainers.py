@@ -1,6 +1,8 @@
 import os
 import sys
 import csv
+import time
+from random import choice
 from multiprocessing import Pool, Process, Manager
 from chatterbot.conversation import Statement
 from chatterbot import utils
@@ -262,6 +264,14 @@ class TwitterTrainer(Trainer):
 def read_file(tsv_file, queue, preprocessors):
     statements_from_file = []
 
+    # Wait for the queue to empty if it becomes too full
+    size = queue.qsize()
+    if size > 50000:
+        while size > 1:
+            print('queue size', queue.qsize())
+            time.sleep(choice([5, 10, 15]))
+            size = queue.qsize()
+
     with open(tsv_file, 'r', encoding='utf-8') as tsv:
         reader = csv.reader(tsv, delimiter='\t')
 
@@ -410,7 +420,6 @@ class UbuntuCorpusTrainer(Trainer):
 
     def train(self):
         import glob
-        import time
 
         # Download and extract the Ubuntu dialog corpus if needed
         corpus_download_path = self.download(self.data_download_url)
@@ -424,10 +433,10 @@ class UbuntuCorpusTrainer(Trainer):
             '**', '**', '*.tsv'
         )
 
-        BATCH_SIZE = 1000
+        BATCH_SIZE = 5000
 
         statements_to_create = []
-        batch_count = 0
+        batch_number = 1
         statement_count = 0
 
         manager = Manager()
@@ -446,29 +455,27 @@ class UbuntuCorpusTrainer(Trainer):
 
         while True:
 
-            print(queue.qsize(), 'items in queue')
-
             if not queue.empty():
                 queue_statemens = queue.get()
-
-                statement_count += len(queue_statemens)
                 statements_to_create.extend(queue_statemens)
+                statement_count += len(queue_statemens)
 
-                if statement_count >= BATCH_SIZE:
-                    batch_count += 1
-
-                    print('Training with batch {} containing {} statements.'.format(
-                        batch_count, statement_count
-                    ))
-
-                    self.chatbot.storage.create_many(statements_to_create)
-                    statements_to_create = []
-                    statement_count = 0
-                else:
+                if statement_count < BATCH_SIZE:
                     # Add more statements to the batch if it is not full
                     continue
 
-            if (map_result.ready()):
+                print('Training with batch {} containing {} statements.'.format(
+                    batch_number, statement_count
+                ))
+
+                print(queue.qsize(), 'items remaining in queue')
+
+                self.chatbot.storage.create_many(statements_to_create)
+                statements_to_create.clear()
+                statement_count = 0
+                batch_number += 1
+
+            if map_result.ready() and queue.empty():
                 break
 
             time.sleep(5)
