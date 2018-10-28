@@ -4,6 +4,7 @@ import csv
 import time
 from random import choice
 from multiprocessing import Pool, Process, Manager
+from dateutil import parser as date_parser
 from chatterbot.conversation import Statement
 from chatterbot import utils
 
@@ -262,15 +263,15 @@ class TwitterTrainer(Trainer):
 
 
 def read_file(tsv_file, queue, preprocessors):
-    statements_from_file = []
 
     # Wait for the queue to empty if it becomes too full
     size = queue.qsize()
     if size > 50000:
-        while size > 1:
-            print('queue size', queue.qsize())
+        while size > 5000:
             time.sleep(choice([5, 10, 15]))
             size = queue.qsize()
+
+    statements_from_file = []
 
     with open(tsv_file, 'r', encoding='utf-8') as tsv:
         reader = csv.reader(tsv, delimiter='\t')
@@ -279,29 +280,27 @@ def read_file(tsv_file, queue, preprocessors):
 
         for row in reader:
             if len(row) > 0:
-                statement = Statement(
-                    text=row[3],
-                    in_response_to=previous_statement_text,
-                    conversation='training'
-                )
+                statement = Statement(text=row[3])
 
                 for preprocessor in preprocessors:
                     statement = preprocessor(statement)
 
-                statement.add_tags('datetime:' + row[0])
-                statement.add_tags('speaker:' + row[1])
+                data = {
+                    'text': statement.text,
+                    'in_response_to': previous_statement_text,
+                    'conversation': 'training',
+                    'created_at': date_parser.parse(row[0]),
+                    'persona': row[1]
+                }
 
                 if row[2].strip():
-                    statement.add_tags('addressing_speaker:', row[2])
+                    data['tags'] = (
+                        'addressing_speaker:' + row[2],
+                    )
 
                 previous_statement_text = statement.text
 
-                statements_from_file.append({
-                    'text': statement.text,
-                    'in_response_to': statement.in_response_to,
-                    'conversation': statement.conversation,
-                    'tags': statement.tags
-                })
+                statements_from_file.append(data)
 
     queue.put(statements_from_file)
 
@@ -447,9 +446,13 @@ class UbuntuCorpusTrainer(Trainer):
             (tsv_file, queue, self.chatbot.preprocessors, ) for tsv_file in glob.iglob(extracted_corpus_path)
         ]
 
-        print('Arguments to process:', len(arguments))
+        remaining_files = len(arguments)
+
+        print('Arguments to process:', remaining_files)
 
         map_result = pool.starmap_async(read_file, arguments)
+
+        start_time = time.time()
 
         print('After map call')
 
@@ -460,6 +463,8 @@ class UbuntuCorpusTrainer(Trainer):
                 statements_to_create.extend(queue_statemens)
                 statement_count += len(queue_statemens)
 
+                remaining_files -= 1
+
                 if statement_count < BATCH_SIZE:
                     # Add more statements to the batch if it is not full
                     continue
@@ -467,8 +472,15 @@ class UbuntuCorpusTrainer(Trainer):
                 print('Training with batch {} containing {} statements.'.format(
                     batch_number, statement_count
                 ))
+                print(remaining_files, 'files remaining.')
 
-                print(queue.qsize(), 'items remaining in queue')
+                elapsed_time = time.time() - start_time
+                print('{:.0f} hours {:.0f} minutes {:.0f} seconds elapsed.'.format(
+                    elapsed_time // 3600 % 24,
+                    elapsed_time // 60 % 60,
+                    elapsed_time % 60
+                ))
+                print('---')
 
                 self.chatbot.storage.create_many(statements_to_create)
                 statements_to_create.clear()
@@ -492,3 +504,5 @@ class UbuntuCorpusTrainer(Trainer):
 
         # Insert the remaining statements
         self.chatbot.storage.create_many(statements_to_create)
+
+        print('Training took', time.time() - start_time, 'seconds.')
