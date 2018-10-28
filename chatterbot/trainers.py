@@ -454,6 +454,9 @@ class UbuntuCorpusTrainer(Trainer):
 
         start_time = time.time()
 
+        files_per_batch = 0
+        last_batch_start_time = start_time
+
         print('After map call')
 
         while True:
@@ -464,6 +467,7 @@ class UbuntuCorpusTrainer(Trainer):
                 statement_count += len(queue_statemens)
 
                 remaining_files -= 1
+                files_per_batch += 1
 
                 if statement_count < BATCH_SIZE:
                     # Add more statements to the batch if it is not full
@@ -480,11 +484,21 @@ class UbuntuCorpusTrainer(Trainer):
                     elapsed_time // 60 % 60,
                     elapsed_time % 60
                 ))
+
+                time_per_batch = time.time() - last_batch_start_time
+                remaining_time = time_per_batch * (remaining_files / files_per_batch)
+                print('{:.0f} hours {:.0f} minutes {:.0f} seconds remaining.'.format(
+                    remaining_time // 3600 % 24,
+                    remaining_time // 60 % 60,
+                    remaining_time % 60
+                ))
                 print('---')
 
                 self.chatbot.storage.create_many(statements_to_create)
+                last_batch_start_time = time.time()
                 statements_to_create.clear()
                 statement_count = 0
+                files_per_batch = 0
                 batch_number += 1
 
             if map_result.ready() and queue.empty():
