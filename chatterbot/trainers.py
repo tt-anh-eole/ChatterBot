@@ -1,5 +1,7 @@
 import os
 import sys
+import csv
+from multiprocessing import Pool, Process, Manager
 from chatterbot.conversation import Statement
 from chatterbot import utils
 
@@ -18,7 +20,7 @@ class Trainer(object):
         Preprocess the input statement.
         """
         for preprocessor in self.chatbot.preprocessors:
-            input_statement = preprocessor(self, input_statement)
+            input_statement = preprocessor(input_statement)
 
         return input_statement
 
@@ -257,6 +259,43 @@ class TwitterTrainer(Trainer):
                 )
 
 
+def read_file(tsv_file, queue, preprocessors):
+    statements_from_file = []
+
+    with open(tsv_file, 'r', encoding='utf-8') as tsv:
+        reader = csv.reader(tsv, delimiter='\t')
+
+        previous_statement_text = None
+
+        for row in reader:
+            if len(row) > 0:
+                statement = Statement(
+                    text=row[3],
+                    in_response_to=previous_statement_text,
+                    conversation='training'
+                )
+
+                for preprocessor in preprocessors:
+                    statement = preprocessor(statement)
+
+                statement.add_tags('datetime:' + row[0])
+                statement.add_tags('speaker:' + row[1])
+
+                if row[2].strip():
+                    statement.add_tags('addressing_speaker:', row[2])
+
+                previous_statement_text = statement.text
+
+                statements_from_file.append({
+                    'text': statement.text,
+                    'in_response_to': statement.in_response_to,
+                    'conversation': statement.conversation,
+                    'tags': statement.tags
+                })
+
+    queue.put(statements_from_file)
+
+
 class UbuntuCorpusTrainer(Trainer):
     """
     Allow chatbots to be trained with the data from
@@ -370,8 +409,8 @@ class UbuntuCorpusTrainer(Trainer):
         return True
 
     def train(self):
-        import csv
         import glob
+        import time
 
         # Download and extract the Ubuntu dialog corpus if needed
         corpus_download_path = self.download(self.data_download_url)
@@ -391,49 +430,58 @@ class UbuntuCorpusTrainer(Trainer):
         batch_count = 0
         statement_count = 0
 
-        for tsv_file in glob.iglob(extracted_corpus_path):
-            with open(tsv_file, 'r', encoding='utf-8') as tsv:
-                reader = csv.reader(tsv, delimiter='\t')
+        manager = Manager()
+        queue = manager.Queue()
+        pool = Pool()
 
-                previous_statement_text = None
+        arguments = [
+            (tsv_file, queue, self.chatbot.preprocessors, ) for tsv_file in glob.iglob(extracted_corpus_path)
+        ]
 
-                for row in reader:
-                    if len(row) > 0:
-                        text = row[3]
-                        statement = self.get_preprocessed_statement(
-                            Statement(
-                                text=text,
-                                in_response_to=previous_statement_text,
-                                conversation='training'
-                            )
-                        )
+        print('Arguments to process:', len(arguments))
 
-                        statement.add_tags('datetime:' + row[0])
-                        statement.add_tags('speaker:' + row[1])
+        map_result = pool.starmap_async(read_file, arguments)
 
-                        if row[2].strip():
-                            statement.add_tags('addressing_speaker:', row[2])
+        print('After map call')
 
-                        previous_statement_text = statement.text
+        while True:
 
-                        statements_to_create.append({
-                            'text': statement.text,
-                            'in_response_to': statement.in_response_to,
-                            'conversation': statement.conversation,
-                            'tags': statement.tags
-                        })
-                        statement_count += 1
+            print(queue.qsize(), 'items in queue')
 
-            if statement_count >= BATCH_SIZE:
-                batch_count += 1
+            if not queue.empty():
+                queue_statemens = queue.get()
 
-                print('Training with batch {} containing {} statements.'.format(
-                    batch_count, statement_count
-                ))
+                statement_count += len(queue_statemens)
+                statements_to_create.extend(queue_statemens)
 
-                self.chatbot.storage.create_many(statements_to_create)
-                statements_to_create = []
-                statement_count = 0
+                if statement_count >= BATCH_SIZE:
+                    batch_count += 1
+
+                    print('Training with batch {} containing {} statements.'.format(
+                        batch_count, statement_count
+                    ))
+
+                    self.chatbot.storage.create_many(statements_to_create)
+                    statements_to_create = []
+                    statement_count = 0
+                else:
+                    # Add more statements to the batch if it is not full
+                    continue
+
+            if (map_result.ready()):
+                break
+
+            time.sleep(5)
+
+        print('Pool about to close')
+
+        pool.close()
+
+        print('Pool closed')
+
+        pool.join()
+
+        print('Pool joined')
 
         # Insert the remaining statements
         self.chatbot.storage.create_many(statements_to_create)
