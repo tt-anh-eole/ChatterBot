@@ -1,3 +1,4 @@
+git+https://github.com/tt-anh-eole/chatterbot-corpus.git
 mathparse>=0.1,<0.2
 nltk>=3.2,<4.0
 pymongo>=3.3,<4.0
